@@ -28,14 +28,14 @@ async fn reconcile(site: StaticSite, ctx: Context<Data>) -> Result<ReconcilerAct
   info!("Reconciled {}", name);
 
   Ok(ReconcilerAction {
-    requeue_after: Some(Duration::from_secs(5)),
+    requeue_after: Some(Duration::from_secs(360)),
   })
 }
 
 fn error_policy(error: &Error, _: Context<Data>) -> ReconcilerAction {
   warn!("Reconcile failed: {:?}", error);
   ReconcilerAction {
-    requeue_after: Some(Duration::from_secs(2)),
+    requeue_after: Some(Duration::from_secs(360)),
   }
 }
 
@@ -49,8 +49,6 @@ pub async fn build_controller() -> BoxFuture<'static, ()> {
     .list(&ListParams::default().limit(1))
     .await
     .expect("CRD is not installed");
-
-  info!("Starting Controller...");
 
   Controller::new(static_sites, ListParams::default())
     .run(reconcile, error_policy, context)

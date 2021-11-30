@@ -33,7 +33,7 @@ async fn main() {
 
   let drainer = build_controller().await;
 
-  info!("Controller started");
+  info!("Controller Started");
 
   tokio::select! {
     _ = drainer => warn!("Controller Drained")
