@@ -12,13 +12,13 @@ use serde::{Deserialize, Serialize};
   kind = "StaticSite",
   namespaced,
   singular = "site",
-  plural = "sites",
-  shortname = "ssites"
+  plural = "sites"
 )]
 pub struct StaticSiteSpec {
   pub git: String,
   pub git_credentials: Option<String>,
-  pub multi_site: bool,
+  pub namespace: Option<String>,
+  pub multi_site: Option<bool>,
   pub oci_repo: String,
   pub oci_credentials: Option<String>,
   pub ingress: Option<IngressConfig>,

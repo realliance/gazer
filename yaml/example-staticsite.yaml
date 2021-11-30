@@ -1,0 +1,8 @@
+---
+apiVersion: realliance.net/v1
+kind: StaticSite
+metadata:
+  name: example
+spec:
+  git: test
+  oci_repo: test
