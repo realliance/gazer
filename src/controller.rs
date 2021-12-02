@@ -1,27 +1,28 @@
 //! Handles controller operations
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use futures::future::BoxFuture;
 use futures::{FutureExt, StreamExt};
-use git2::{Repository, Direction, RemoteHead};
+use git2::{Direction, RemoteHead, Repository};
 use kube::api::ListParams;
 use kube::runtime::controller::{Context, ReconcilerAction};
 use kube::runtime::Controller;
 use kube::{Api, Client, ResourceExt};
 use semver::Version;
+use thiserror::Error;
 use tokio::time::Duration;
 use tracing::{info, warn};
-use thiserror::Error;
 
+use crate::build::build_container;
 use crate::StaticSite;
 
 #[derive(Error, Debug)]
-enum ControllerError {
+pub enum ControllerError {
   #[error("Kube Api Error: {0}")]
   KubeError(kube::Error),
   #[error("ReconcileError: {0}")]
-  ReconcileError(String)
+  ReconcileError(String),
 }
 
 #[derive(PartialEq, Eq, Debug, Clone)]
@@ -29,7 +30,7 @@ enum GitRefType {
   Branch,
   Tag,
   Pull,
-  HEAD
+  HEAD,
 }
 
 impl Into<GitRefType> for &str {
@@ -53,7 +54,7 @@ struct GitRef {
   pub ref_type: GitRefType,
   pub full_ref: String,
   pub oid: String,
-  pub name: String
+  pub name: String,
 }
 
 impl GitRef {
@@ -73,7 +74,7 @@ impl<'a> Into<GitRef> for &RemoteHead<'a> {
       ref_type: self.name().into(),
       full_ref: self.name().to_string(),
       oid: self.oid().to_string(),
-      name: GitRef::extract_name(self.name().to_string())
+      name: GitRef::extract_name(self.name().to_string()),
     }
   }
 }
@@ -85,10 +86,12 @@ fn determine_selected_ref(site: &StaticSite, ref_list: Vec<GitRef>) -> Option<(S
     // Prepare tags for semver parsing (remove v prefixes if they exist)
     let semver_pairs: Vec<_> = tags.iter().map(|&x| (x.name.replace("v", ""), x.clone())).collect();
     // Get valid semver targets
-    let mut semver_tags: Vec<(Version, GitRef)> = semver_pairs.iter()
+    let mut semver_tags: Vec<(Version, GitRef)> = semver_pairs
+      .iter()
       .map(|(tag, g)| (Version::parse(tag.as_str()), g.clone()))
       .filter(|(semver, _)| semver.is_ok())
-      .map(|(valid_semver, g)| (valid_semver.unwrap(), g)).collect();
+      .map(|(valid_semver, g)| (valid_semver.unwrap(), g))
+      .collect();
     // Find latest semver tag
     semver_tags.sort_by(|(a, _), (b, _)| b.cmp(a));
     if let Some((_, git_ref)) = semver_tags.first() {
@@ -119,36 +122,67 @@ struct Data {
   client: Client,
 }
 
-async fn reconcile(site: StaticSite, ctx: Context<Data>) -> Result<ReconcilerAction, ControllerError> {
-  let _client = ctx.get_ref().client.clone();
-  let ns = ResourceExt::namespace(&site).unwrap_or("global".to_string());
-  let name = ResourceExt::name(&site);
-  let path = Path::new("/tmp").join(format!("{}_{}", ns, name));
-
+fn get_targets(path: &PathBuf, git: String) -> Result<Vec<GitRef>, ControllerError> {
   let repo_result = Repository::init(path.clone());
   if repo_result.is_err() {
-    return Err(ControllerError::ReconcileError(format!("Failed to init repo at {:?}", path)));
+    return Err(ControllerError::ReconcileError(format!(
+      "Failed to init repo at {:?}",
+      path
+    )));
   }
   let repo = repo_result.unwrap();
-  let remote_result = repo.remote_anonymous(&site.spec.git);
+  let remote_result = repo.remote_anonymous(&git);
   if remote_result.is_err() {
-    return Err(ControllerError::ReconcileError(format!("Failed to find remote {}", site.spec.git.clone())));
+    return Err(ControllerError::ReconcileError(format!(
+      "Failed to find remote {}",
+      git.clone()
+    )));
   }
   let mut remote = remote_result.unwrap();
   let connection = remote.connect_auth(Direction::Fetch, None, None).unwrap();
 
   let remote_head = connection.list().unwrap();
-  let valid_update_targets: Vec<GitRef> = remote_head.iter().map(|x| x.into()).filter(|x: &GitRef| x.ref_type != GitRefType::Pull).collect();
+  Ok(
+    remote_head
+      .iter()
+      .map(|x| x.into())
+      .filter(|x: &GitRef| x.ref_type != GitRefType::Pull)
+      .collect(),
+  )
+}
 
-  if let Some((selected_ref, image_tag)) = determine_selected_ref(&site, valid_update_targets) {
-    info!("Selected Ref for {}: {} with image tag {}", name, selected_ref, image_tag);
-  } else {
-    return Err(ControllerError::ReconcileError("Could not find valid ref to watch!".to_string()));
+async fn reconcile(site: StaticSite, ctx: Context<Data>) -> Result<ReconcilerAction, ControllerError> {
+  let ns = ResourceExt::namespace(&site).unwrap_or("global".to_string());
+  let name = ResourceExt::name(&site);
+  let path = Path::new("/tmp").join(format!("{}_{}", ns, name));
+
+  let targets = get_targets(&path, site.spec.git.clone());
+
+  if let Err(err) = targets {
+    return Err(err);
   }
 
-  // Build and push cloned with kaniko
-
-  // Clean up tmp
+  if let Some((selected_ref, image_tag)) = determine_selected_ref(&site, targets.unwrap()) {
+    info!(
+      "Selected Ref for {}: {} with image tag {}",
+      name, selected_ref, image_tag
+    );
+    let build_result = build_container(
+      ctx.get_ref().client.clone(),
+      ns,
+      site.spec.git.clone(),
+      selected_ref,
+      image_tag,
+    )
+    .await;
+    if let Err(err) = build_result {
+      return Err(err);
+    }
+  } else {
+    return Err(ControllerError::ReconcileError(
+      "Could not find valid ref to watch!".to_string(),
+    ));
+  }
 
   info!("{} Reconciled", name);
 

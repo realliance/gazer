@@ -8,6 +8,7 @@ use tracing::{info, warn};
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{EnvFilter, Registry};
 
+pub mod build;
 pub mod cli;
 pub mod controller;
 pub mod crd;
