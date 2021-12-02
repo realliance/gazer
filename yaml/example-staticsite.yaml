@@ -6,3 +6,4 @@ metadata:
 spec:
   git: https://github.com/ChristopherJMiller/bng-site.git
   oci_repo: test
+  use_semver: true

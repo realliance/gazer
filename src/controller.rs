@@ -9,6 +9,7 @@ use kube::api::ListParams;
 use kube::runtime::controller::{Context, ReconcilerAction};
 use kube::runtime::Controller;
 use kube::{Api, Client, ResourceExt};
+use semver::Version;
 use tokio::time::Duration;
 use tracing::{info, warn};
 use thiserror::Error;
@@ -23,7 +24,7 @@ enum ControllerError {
   ReconcileError(String)
 }
 
-#[derive(PartialEq, Eq, Debug)]
+#[derive(PartialEq, Eq, Debug, Clone)]
 enum GitRefType {
   Branch,
   Tag,
@@ -47,7 +48,7 @@ impl Into<GitRefType> for &str {
   }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct GitRef {
   pub ref_type: GitRefType,
   pub full_ref: String,
@@ -73,6 +74,39 @@ impl<'a> Into<GitRef> for &RemoteHead<'a> {
       full_ref: self.name().to_string(),
       oid: self.oid().to_string(),
       name: GitRef::extract_name(self.name().to_string())
+    }
+  }
+}
+
+fn determine_selected_ref(site: &StaticSite, ref_list: Vec<GitRef>) -> Option<(String, String)> {
+  if site.spec.use_semver.is_some() && site.spec.use_semver.unwrap() {
+    // Get tags
+    let tags: Vec<_> = ref_list.iter().filter(|&x| x.ref_type == GitRefType::Tag).collect();
+    // Prepare tags for semver parsing (remove v prefixes if they exist)
+    let semver_pairs: Vec<_> = tags.iter().map(|&x| (x.name.replace("v", ""), x.clone())).collect();
+    // Get valid semver targets
+    let mut semver_tags: Vec<(Version, GitRef)> = semver_pairs.iter()
+      .map(|(tag, g)| (Version::parse(tag.as_str()), g.clone()))
+      .filter(|(semver, _)| semver.is_ok())
+      .map(|(valid_semver, g)| (valid_semver.unwrap(), g)).collect();
+    // Find latest semver tag
+    semver_tags.sort_by(|(a, _), (b, _)| b.cmp(a));
+    if let Some((_, git_ref)) = semver_tags.first() {
+      Some((git_ref.full_ref.clone(), git_ref.name.clone()))
+    } else {
+      None
+    }
+  } else if let Some(branch) = site.spec.branch.clone() {
+    if let Some(git_ref) = ref_list.iter().find(|&x| x.name == branch) {
+      Some((git_ref.full_ref.clone(), git_ref.name.clone()))
+    } else {
+      None
+    }
+  } else {
+    if let Some(git_ref) = ref_list.iter().find(|&x| x.ref_type == GitRefType::HEAD) {
+      Some((git_ref.full_ref.clone(), git_ref.oid.clone()))
+    } else {
+      None
     }
   }
 }
@@ -103,17 +137,18 @@ async fn reconcile(site: StaticSite, ctx: Context<Data>) -> Result<ReconcilerAct
   let mut remote = remote_result.unwrap();
   let connection = remote.connect_auth(Direction::Fetch, None, None).unwrap();
 
-  // If so, clone into /tmp/{proj}
+  let remote_head = connection.list().unwrap();
+  let valid_update_targets: Vec<GitRef> = remote_head.iter().map(|x| x.into()).filter(|x: &GitRef| x.ref_type != GitRefType::Pull).collect();
+
+  if let Some((selected_ref, image_tag)) = determine_selected_ref(&site, valid_update_targets) {
+    info!("Selected Ref for {}: {} with image tag {}", name, selected_ref, image_tag);
+  } else {
+    return Err(ControllerError::ReconcileError("Could not find valid ref to watch!".to_string()));
+  }
 
   // Build and push cloned with kaniko
 
   // Clean up tmp
-
-  let remote_head = connection.list().unwrap();
-  let valid_update_targets: Vec<GitRef> = remote_head.iter().map(|x| x.into()).filter(|x: &GitRef| x.ref_type == GitRefType::Branch || x.ref_type == GitRefType::Tag).collect();
-  for target in valid_update_targets {
-    info!("{}: {:?}", name, target);
-  }
 
   info!("{} Reconciled", name);
 

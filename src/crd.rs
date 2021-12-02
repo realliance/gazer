@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 pub struct StaticSiteSpec {
   pub git: String,
   pub branch: Option<String>,
-  pub tag_blob: Option<String>,
+  pub use_semver: Option<bool>,
   pub git_credentials: Option<String>,
   pub namespace: Option<String>,
   pub multi_site: Option<bool>,
