@@ -5,8 +5,8 @@ metadata:
   name: example-semver
 spec:
   git: https://github.com/ChristopherJMiller/bng-site.git
-  oci_repo: test
-  use_semver: true
+  ociRepo: test
+  useSemver: true
 ---
 apiVersion: realliance.net/v1
 kind: StaticSite
@@ -14,5 +14,5 @@ metadata:
   name: example-head
 spec:
   git: https://github.com/ChristopherJMiller/letsmeet.git
-  oci_repo: test
-  use_semver: false
+  ociRepo: test
+  useSemver: false

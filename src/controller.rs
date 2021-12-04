@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use futures::future::BoxFuture;
 use futures::{FutureExt, StreamExt};
-use git2::{Direction, RemoteHead, Repository};
+use git2::{Direction, RemoteHead, Repository, RemoteCallbacks, Cred};
 use kube::api::ListParams;
 use kube::runtime::controller::{Context, ReconcilerAction};
 use kube::runtime::Controller;
@@ -16,6 +16,7 @@ use tracing::{info, warn};
 
 use crate::build::{build_job, delete_job, get_job_status};
 use crate::StaticSite;
+use crate::crd::GitCredentials;
 
 #[derive(Error, Debug)]
 pub enum ControllerError {
@@ -122,7 +123,7 @@ struct Data {
   client: Client,
 }
 
-fn get_targets(path: &PathBuf, git: String) -> Result<Vec<GitRef>, ControllerError> {
+fn get_targets(path: &PathBuf, git: String, credentials: Option<GitCredentials>) -> Result<Vec<GitRef>, ControllerError> {
   let repo_result = Repository::init(path.clone());
   if repo_result.is_err() {
     return Err(ControllerError::ReconcileError(format!(
@@ -139,16 +140,35 @@ fn get_targets(path: &PathBuf, git: String) -> Result<Vec<GitRef>, ControllerErr
     )));
   }
   let mut remote = remote_result.unwrap();
-  let connection = remote.connect_auth(Direction::Fetch, None, None).unwrap();
 
-  let remote_head = connection.list().unwrap();
-  Ok(
-    remote_head
-      .iter()
-      .map(|x| x.into())
-      .filter(|x: &GitRef| x.ref_type != GitRefType::Pull)
-      .collect(),
-  )
+  let mut remote_callbacks = RemoteCallbacks::new();
+  
+  if let Some(creds) = credentials {
+    if let Some(plaintext) = creds.plaintext {
+      remote_callbacks.credentials(move |_, _, _| {
+        Cred::userpass_plaintext(&plaintext.username, &plaintext.password)
+      });
+    } else if let Some(_) = creds.from_secret {
+
+    } else {
+      return Err(ControllerError::ReconcileError("Provided an invalid crential entry!".to_string()));
+    }
+  }
+
+  let conn = remote.connect_auth(Direction::Fetch, Some(remote_callbacks), None);
+
+  match conn {
+    Ok(connection) => {
+      Ok(
+        connection.list().unwrap()
+          .iter()
+          .map(|x| x.into())
+          .filter(|x: &GitRef| x.ref_type != GitRefType::Pull)
+          .collect::<Vec<GitRef>>().clone(),
+      )
+    },
+    Err(err) => Err(ControllerError::ReconcileError(err.to_string()))
+  }
 }
 
 async fn reconcile(site: StaticSite, ctx: Context<Data>) -> Result<ReconcilerAction, ControllerError> {
@@ -180,7 +200,7 @@ async fn reconcile(site: StaticSite, ctx: Context<Data>) -> Result<ReconcilerAct
   // If not, check for changes and build job
   let path = Path::new("/tmp").join(format!("{}_{}", ns, name));
 
-  let targets = get_targets(&path, site.spec.git.clone());
+  let targets = get_targets(&path, site.spec.git.clone(), site.spec.git_credentials.clone());
 
   if let Err(err) = targets {
     return Err(err);
