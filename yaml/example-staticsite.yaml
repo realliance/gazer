@@ -2,8 +2,17 @@
 apiVersion: realliance.net/v1
 kind: StaticSite
 metadata:
-  name: example
+  name: example-semver
 spec:
   git: https://github.com/ChristopherJMiller/bng-site.git
   oci_repo: test
   use_semver: true
+---
+apiVersion: realliance.net/v1
+kind: StaticSite
+metadata:
+  name: example-head
+spec:
+  git: https://github.com/ChristopherJMiller/letsmeet.git
+  oci_repo: test
+  use_semver: false

@@ -14,7 +14,7 @@ use thiserror::Error;
 use tokio::time::Duration;
 use tracing::{info, warn};
 
-use crate::build::build_container;
+use crate::build::{build_job, delete_job, get_job_status};
 use crate::StaticSite;
 
 #[derive(Error, Debug)]
@@ -154,6 +154,30 @@ fn get_targets(path: &PathBuf, git: String) -> Result<Vec<GitRef>, ControllerErr
 async fn reconcile(site: StaticSite, ctx: Context<Data>) -> Result<ReconcilerAction, ControllerError> {
   let ns = ResourceExt::namespace(&site).unwrap_or("global".to_string());
   let name = ResourceExt::name(&site);
+  let client = ctx.get_ref().client.clone();
+
+  // Check if job already exists
+  if let Ok(job) = get_job_status(client.clone(), ns.clone(), name.clone()).await {
+    // Check if complete
+    if job.status.unwrap().completion_time.is_some() {
+      if let Err(err) = delete_job(client, ns.clone(), name.clone()).await {
+        return Err(ControllerError::KubeError(err));
+      } else {
+        info!("{} reconciled, job completed", name);
+        return Ok(ReconcilerAction {
+          requeue_after: Some(Duration::from_secs(360)),
+        });
+      }
+    }
+
+    // Otherwise do another short requeue
+    info!("{} reconciled, waiting on job", name);
+    return Ok(ReconcilerAction {
+      requeue_after: Some(Duration::from_secs(60)),
+    });
+  }
+
+  // If not, check for changes and build job
   let path = Path::new("/tmp").join(format!("{}_{}", ns, name));
 
   let targets = get_targets(&path, site.spec.git.clone());
@@ -167,28 +191,24 @@ async fn reconcile(site: StaticSite, ctx: Context<Data>) -> Result<ReconcilerAct
       "Selected Ref for {}: {} with image tag {}",
       name, selected_ref, image_tag
     );
-    let build_result = build_container(
-      ctx.get_ref().client.clone(),
-      ns,
-      site.spec.git.clone(),
-      selected_ref,
-      image_tag,
-    )
-    .await;
+    let build_result = build_job(client, ns, name.clone(), site.spec.git.clone(), selected_ref, image_tag).await;
+
+    // Report any errors while building job
     if let Err(err) = build_result {
       return Err(err);
     }
+
+    info!("{} reconciled, job started", name);
+
+    // Requeue earlier to check on running job
+    return Ok(ReconcilerAction {
+      requeue_after: Some(Duration::from_secs(60)),
+    });
   } else {
     return Err(ControllerError::ReconcileError(
       "Could not find valid ref to watch!".to_string(),
     ));
   }
-
-  info!("{} Reconciled", name);
-
-  Ok(ReconcilerAction {
-    requeue_after: Some(Duration::from_secs(360)),
-  })
 }
 
 fn error_policy(error: &ControllerError, _: Context<Data>) -> ReconcilerAction {

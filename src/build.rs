@@ -1,22 +1,25 @@
-use std::io::Write;
-
-use futures::{stream, StreamExt, TryStreamExt};
-use k8s_openapi::api::core::v1::Pod;
-use kube::api::{AttachParams, AttachedProcess, DeleteParams, ListParams, PostParams};
-use kube::core::WatchEvent;
-use kube::{Api, Client, ResourceExt};
-use tracing::info;
+use k8s_openapi::api::batch::v1::Job;
+use kube::api::{DeleteParams, PostParams, PropagationPolicy};
+use kube::{Api, Client};
 
 use crate::controller::ControllerError;
 
-pub async fn build_container(
+fn get_job_name(name: String) -> String {
+  format!("gazer-build-{}", name)
+}
+
+pub async fn build_job(
   client: Client,
   namespace: String,
+  name: String,
   git: String,
   git_ref: String,
   _: String,
 ) -> Result<(), ControllerError> {
+  // Remote any http prefixes (common in github cases)
   let prep_git = git.replace("https://", "").replace("http://", "");
+
+  // Build kaniko context
   let context = vec![
     "--context=".to_string(),
     "git://".to_string(),
@@ -26,66 +29,61 @@ pub async fn build_container(
   ]
   .join("");
 
-  let p: Pod = serde_json::from_value(serde_json::json!({
-    "apiVersion": "v1",
-    "kind": "Pod",
-    "metadata": { "name": "gazer-build" },
+  let job_name = get_job_name(name.clone());
+  let job_pod_name = format!("{}-worker", job_name);
+
+  let job: Job = serde_json::from_value(serde_json::json!({
+    "apiVersion": "batch/v1",
+    "kind": "Job",
+    "metadata": { "name": job_name },
     "spec": {
-      "containers": [{
-        "name": "kaniko",
-        "image": "gcr.io/kaniko-project/executor:latest",
-        "args": [
-          context,
-          "--no-push"
-        ]
-      }],
-    }
+      "template": {
+        "metadata": {
+          "name": job_pod_name
+        },
+        "spec": {
+          "containers": [{
+            "name": "kaniko",
+            "image": "gcr.io/kaniko-project/executor:latest",
+            "args": [
+              context,
+              "--no-push"
+            ],
+          }],
+          "restartPolicy": "Never",
+        },
+      },
+    },
   }))
   .unwrap();
 
-  let pods: Api<Pod> = Api::namespaced(client, &namespace);
-  pods.create(&PostParams::default(), &p).await.unwrap();
-
-  // https://github.com/kube-rs/kube-rs/blob/6537cf006dbdd2a2f958d958d9fa916362581dca/examples/pod_exec.rs#L40
-  let lp = ListParams::default().fields("metadata.name=gazer-build").timeout(10);
-  let mut stream = pods.watch(&lp, "0").await.unwrap().boxed();
-  while let Some(status) = stream.try_next().await.unwrap() {
-    match status {
-      WatchEvent::Added(o) => {
-        info!("Added {}", o.name());
-      },
-      WatchEvent::Modified(o) => {
-        let s = o.status.as_ref().expect("status exists on pod");
-        if s.phase.clone().unwrap_or_default() == "Running" {
-          info!("Ready to attach to {}", o.name());
-          break;
-        }
-      },
-      _ => {},
-    }
-  }
-
-  let attached = pods.attach("gazer-build", &AttachParams::default()).await.unwrap();
-  combined_output(attached).await;
-
-  pods.delete("gazer-build", &DeleteParams::default()).await.unwrap();
+  let jobs: Api<Job> = Api::namespaced(client, &namespace);
+  jobs.create(&PostParams::default(), &job).await.unwrap();
 
   Ok(())
 }
 
-// https://github.com/kube-rs/kube-rs/blob/6537cf006dbdd2a2f958d958d9fa916362581dca/examples/pod_attach.rs#L102
-async fn combined_output(mut attached: AttachedProcess) {
-  let stdout = tokio_util::io::ReaderStream::new(attached.stdout().unwrap());
-  let stderr = tokio_util::io::ReaderStream::new(attached.stderr().unwrap());
-  let outputs = stream::select(stdout, stderr).for_each(|res| async {
-    if let Ok(bytes) = res {
-      let out = std::io::stdout();
-      out.lock().write_all(&bytes).unwrap();
-    }
-  });
-  outputs.await;
+pub async fn get_job_status(client: Client, namespace: String, name: String) -> Result<Job, kube::Error> {
+  let jobs: Api<Job> = Api::namespaced(client, &namespace);
 
-  if let Some(status) = attached.await {
-    info!("{:?}", status);
+  jobs.get_status(&get_job_name(name)).await
+}
+
+pub async fn delete_job(client: Client, namespace: String, name: String) -> Result<(), kube::Error> {
+  let jobs: Api<Job> = Api::namespaced(client, &namespace);
+  if let Err(err) = jobs
+    .delete(
+      &get_job_name(name),
+      &DeleteParams {
+        dry_run: false,
+        propagation_policy: Some(PropagationPolicy::Background),
+        ..DeleteParams::default()
+      },
+    )
+    .await
+  {
+    Err(err)
+  } else {
+    Ok(())
   }
 }
