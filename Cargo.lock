@@ -358,6 +358,7 @@ dependencies = [
 name = "gazer"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "clap",
  "futures",
  "git2",

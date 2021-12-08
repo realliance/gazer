@@ -16,7 +16,7 @@ use tracing::{info, warn};
 
 use crate::build::{build_job, delete_job, get_job_status};
 use crate::StaticSite;
-use crate::crd::GitCredentials;
+use crate::crd::Credentials;
 
 #[derive(Error, Debug)]
 pub enum ControllerError {
@@ -81,6 +81,7 @@ impl<'a> Into<GitRef> for &RemoteHead<'a> {
 }
 
 fn determine_selected_ref(site: &StaticSite, ref_list: Vec<GitRef>) -> Option<(String, String)> {
+  // Use Semver
   if site.spec.use_semver.is_some() && site.spec.use_semver.unwrap() {
     // Get tags
     let tags: Vec<_> = ref_list.iter().filter(|&x| x.ref_type == GitRefType::Tag).collect();
@@ -100,12 +101,14 @@ fn determine_selected_ref(site: &StaticSite, ref_list: Vec<GitRef>) -> Option<(S
     } else {
       None
     }
+  // Use branch
   } else if let Some(branch) = site.spec.branch.clone() {
     if let Some(git_ref) = ref_list.iter().find(|&x| x.name == branch) {
       Some((git_ref.full_ref.clone(), git_ref.name.clone()))
     } else {
       None
     }
+  // Use HEAD
   } else {
     if let Some(git_ref) = ref_list.iter().find(|&x| x.ref_type == GitRefType::HEAD) {
       Some((git_ref.full_ref.clone(), git_ref.oid.clone()))
@@ -123,7 +126,7 @@ struct Data {
   client: Client,
 }
 
-fn get_targets(path: &PathBuf, git: String, credentials: Option<GitCredentials>) -> Result<Vec<GitRef>, ControllerError> {
+fn get_targets(path: &PathBuf, git: String, credentials: Option<Credentials>) -> Result<Vec<GitRef>, ControllerError> {
   let repo_result = Repository::init(path.clone());
   if repo_result.is_err() {
     return Err(ControllerError::ReconcileError(format!(
@@ -211,14 +214,12 @@ async fn reconcile(site: StaticSite, ctx: Context<Data>) -> Result<ReconcilerAct
       "Selected Ref for {}: {} with image tag {}",
       name, selected_ref, image_tag
     );
-    let build_result = build_job(client, ns, name.clone(), site.spec.git.clone(), selected_ref, image_tag).await;
+    let build_result = build_job(client, ns, name.clone(), selected_ref, site.spec.clone(), image_tag).await;
 
     // Report any errors while building job
     if let Err(err) = build_result {
       return Err(err);
     }
-
-    info!("{} reconciled, job started", name);
 
     // Requeue earlier to check on running job
     return Ok(ReconcilerAction {
